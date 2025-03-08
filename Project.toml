@@ -1,7 +1,7 @@
 name = "BrillouinZoneMeshes"
 uuid = "9f696214-9961-49f3-89a2-cb1ea204eb6e"
 authors = ["Xiansheng Cai", "Tao Wang", "Kun Chen"]
-version = "0.2.3"
+version = "0.3.0"
 
 [deps]
 AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
@@ -17,7 +17,7 @@ spglib_jll = "ac4a9f1e-bdb2-5204-990c-47c8b2f70d4e"
 
 [compat]
 AbstractTrees = "0.3, 0.4"
-CompositeGrids = "0.0.6, 0.1"
+CompositeGrids = "0.0.6, 0.1, 0.2"
 Roots = "2.0"
 Spglib = "0.6.0"
 StaticArrays = "1"
