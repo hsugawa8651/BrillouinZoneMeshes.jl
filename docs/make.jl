@@ -22,6 +22,7 @@ makedocs(;
             "BaseMesh" => "lib/BaseMesh.md",
             "MeshMaps" => "lib/MeshMaps.md",
             "BZMeshes" => "lib/BZMeshes.md",
+            "PointSymmetry" => "lib/PointSymmetry.md",
         ]
     ]
 )
