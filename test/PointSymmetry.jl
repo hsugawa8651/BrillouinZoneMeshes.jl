@@ -93,6 +93,20 @@ end
            a * [[1.0 -1 / 2 0.0]; [0.0 sqrt(3) / 2 0.0]; [0.0 0.0 sqrt(8 / 3)]])
 end
 
+@testset "v0.6 deprecated field access" begin
+    a = 10.3
+    lattice = a / 2 * [[0 1 1.0]; [1 0 1.0]; [1 1 0.0]]
+    atoms = [1, 1]
+    positions = [ones(3) / 8, -ones(3) / 8]
+    atom_groups = [[1, 2]]
+    _lattice, _positions = PointSymmetry._make3D(lattice, positions)
+    cell, _ = PointSymmetry.spglib_cell(_lattice, atom_groups, _positions, [])
+    std = PointSymmetry.standardize_cell(cell)
+    @test_throws ErrorException std.types     # "Use `atoms` instead"
+    @test_throws ErrorException std.numbers   # "Use `atoms` instead"
+    @test std.atoms isa AbstractVector         # new field works
+end
+
 @testset "Spglib grid index test" begin
     getidx(umesh, kidx) = BZMeshes.spglib_grid_address_to_index(umesh, kidx)
     function test(dim, lattice, atoms, pos, ksize, kshift::Bool)

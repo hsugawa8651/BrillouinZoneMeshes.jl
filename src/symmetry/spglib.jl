@@ -1,27 +1,36 @@
 #Adapted from DFTK.jl: https://github.com/JuliaMolSim/DFTK.jl/blob/master/src/external/spglib.jl
+# Updated to use Spglib.jl v1.x Julia API (no more direct ccall to spglib_jll)
 
-# Routines for interaction with spglib
-# Note: spglib/C uses the row-major convention, thus we need to perform transposes
-#       between julia and spglib (https://spglib.github.io/spglib/variable.html)
-#       In contrast, Spglib.jl follows the spglib/python convention, which is the one used
-#       in DFTK. So, when calling Spglib functions, we do not perform transposes.
+# Routines for interaction with spglib via Spglib.jl v1.x
+# Note: Spglib.jl v1.x follows the spglib/python convention (same as DFTK).
+#       Rotations returned by get_symmetry are already transposed to Julia column-major.
 import Spglib
-const SPGLIB = spglib_jll.libsymspg
-
-function spglib_get_error_message()
-    error_code = ccall((:spg_get_error_code, SPGLIB), Cint, ())
-    return unsafe_string(ccall((:spg_get_error_message, SPGLIB), Cstring, (Cint,), error_code))
-end
 
 """
-Convert the DFTK atom groups and positions datastructure into a tuple of datastructures for
+Wrapper around Spglib.standardize_cell return value.
+Provides error messages when accessing deprecated v0.6 field names.
+"""
+struct StandardizedCell{C}
+    cell::C
+end
+
+function Base.getproperty(w::StandardizedCell, s::Symbol)
+    if s === :types
+        error("`types` field was removed in Spglib v1.x. Use `atoms` instead.")
+    elseif s === :numbers
+        error("`numbers` field was removed in Spglib v1.x. Use `atoms` instead.")
+    end
+    getproperty(getfield(w, :cell), s)
+end
+Base.propertynames(w::StandardizedCell) = propertynames(getfield(w, :cell))
+
+"""
+Convert the atom groups and positions datastructure into a tuple of datastructures for
 use with spglib. Validity of the input data is assumed. The output `positions` contains
 positions per atom, `numbers` contains the mapping atom to a unique number for each group
 of indistinguishable atoms, `spins` contains the ``z``-component of the initial magnetic
-moment on each atom, `mapping` contains the
-mapping of the `numbers` to the element objects in DFTK and `collinear` whether
-the atoms mark a case of collinear spin or not. Notice that if `collinear` is false
-then `spins` is garbage.
+moment on each atom, and `collinear` whether the atoms mark a case of collinear spin or not.
+Notice that if `collinear` is false then `spins` is garbage.
 """
 function spglib_atoms(atom_groups,
     positions::AbstractVector{<:AbstractVector{<:AbstractFloat}},
@@ -29,10 +38,7 @@ function spglib_atoms(atom_groups,
     n_attypes = length(positions)
     spg_numbers = zeros(Cint, n_attypes)
     spg_spins = zeros(Cdouble, n_attypes)
-    spg_positions = zeros(Cdouble, 3, n_attypes)
-    # Note: The storage format now used in Spglib.Cell is vector of vectors of length 3
-    #       but we stick to the matrix-based storage format for now to keep compatibility
-    #       spglib_jll.libsymspg.
+    spg_positions = [zeros(Float64, 3) for _ in 1:n_attypes]
 
     arbitrary_spin = false
     offset = 0
@@ -40,7 +46,7 @@ function spglib_atoms(atom_groups,
         for iatom in indices
             offset += 1
             spg_numbers[offset] = igroup
-            spg_positions[:, offset] .= positions[iatom]
+            spg_positions[offset][1:length(positions[iatom])] .= positions[iatom]
 
             if !isempty(magnetic_moments)
                 magmom = magnetic_moments[iatom]
@@ -74,38 +80,19 @@ function spglib_get_symmetry(lattice::AbstractMatrix{<:AbstractFloat}, atom_grou
         return [Mat3{Int}(I)], [Vec3(zeros(3))]
     end
 
-    # Ask spglib for symmetry operations and for irreducible mesh
-    spg = spglib_atoms(atom_groups, positions, magnetic_moments)
-    max_ops = max(384, 50 * length(spg.numbers))  # Max symmetry operations spglib searches
-    spg_rotations = Array{Cint}(undef, 3, 3, max_ops)
-    spg_translations = Array{Cdouble}(undef, 3, max_ops)
-    if spg.collinear
-        spg_equivalent_atoms = Array{Cint}(undef, max_ops)
-        spg_n_ops = ccall((:spg_get_symmetry_with_collinear_spin, SPGLIB), Cint,
-            (Ptr{Cint}, Ptr{Cdouble}, Ptr{Cint}, Cint, Ptr{Cdouble},
-                Ptr{Cdouble}, Ptr{Cint}, Ptr{Cdouble}, Cint, Cdouble),
-            spg_rotations, spg_translations, spg_equivalent_atoms, max_ops, copy(lattice'),
-            spg.positions, spg.numbers, spg.spins, Cint(length(spg.numbers)), tol_symmetry)
+    # Build SpglibCell and call Spglib.jl v1.x API
+    cell, collinear = spglib_cell(lattice, atom_groups, positions, magnetic_moments)
+
+    if collinear
+        rotations_raw, translations_raw, _ = Spglib.get_symmetry_with_collinear_spin(cell, tol_symmetry)
     else
-        spg_n_ops = ccall((:spg_get_symmetry, SPGLIB), Cint,
-            (Ptr{Cint}, Ptr{Cdouble}, Cint, Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cint}, Cint, Cdouble),
-            spg_rotations, spg_translations, max_ops, copy(lattice'), spg.positions, spg.numbers,
-            Cint(length(spg.numbers)), tol_symmetry)
+        rotations_raw, translations_raw = Spglib.get_symmetry(cell, tol_symmetry)
     end
 
-    # If spglib does not find symmetries give an error
-    if spg_n_ops == 0
-        err_message = spglib_get_error_message()
-        error("spglib failed to get the symmetries. Check your lattice, use a " *
-              "uniform BZ mesh or disable symmetries. Spglib reported : " * err_message)
-    end
-
-    # Note: Transposes are performed to convert between spglib row-major to julia column-major
-    Ws = [Mat3{Int}(spg_rotations[:, :, i]') for i in 1:spg_n_ops]
-    ws = [Vec3{eltype(lattice)}(spg_translations[:, i]) for i in 1:spg_n_ops]
-    # here we brutally cast spglib's return value; this implies a
-    # loss of precision if we are currently working in more than Float64
-    # TODO reconstruct w in more precision
+    # Convert SMatrix/SVector to Mat3/Vec3
+    # Note: Spglib.jl v1.x already transposes rotations to Julia column-major convention
+    Ws = [Mat3{Int}(W) for W in rotations_raw]
+    ws = [Vec3{eltype(lattice)}(w) for w in translations_raw]
 
     # Check (W, w) maps atoms to equivalent atoms in the lattice
     for (W, w) in zip(Ws, ws)
@@ -132,25 +119,27 @@ function spglib_get_symmetry(lattice::AbstractMatrix{<:AbstractFloat}, atom_grou
     return Ws, ws
 end
 
-# The irreducible k-points are searched from unique k-point mesh grids from direct (real space) basis vectors 
+# The irreducible k-points are searched from unique k-point mesh grids from direct (real space) basis vectors
 # and a set of rotation parts of symmetry operations in direct space with one or multiple stabilizers.
 function spglib_get_stabilized_reciprocal_mesh(kgrid_size, rotations::Vector;
     is_shift=Vec3(0, 0, 0),
     is_time_reversal=false,
     qpoints=[Vec3(0.0, 0.0, 0.0)])
-    spg_rotations = cat([copy(Cint.(S')) for S in rotations]..., dims=3)
 
-    nkpt = prod(kgrid_size)
-    mapping = Vector{Cint}(undef, nkpt)
-    grid_address = Matrix{Cint}(undef, 3, nkpt)
+    # Convert rotations to SMatrix format expected by Spglib.jl v1.x
+    spg_rotations = [SMatrix{3,3,Int32,9}(Cint.(S)) for S in rotations]
 
-    nrot = length(rotations)
-    n_kpts = ccall((:spg_get_stabilized_reciprocal_mesh, SPGLIB), Cint,
-        (Ptr{Cint}, Ptr{Cint}, Ptr{Cint}, Ptr{Cint}, Cint, Cint, Ptr{Cint}, Cint, Ptr{Cdouble}),
-        grid_address, mapping, [Cint.(kgrid_size)...], [Cint.(is_shift)...], Cint(is_time_reversal),
-        Cint(nrot), spg_rotations, Cint(length(qpoints)), Vec3{Float64}.(qpoints))
+    result = Spglib.get_stabilized_reciprocal_mesh(
+        spg_rotations, kgrid_size, qpoints;
+        is_shift=is_shift, is_time_reversal=is_time_reversal
+    )
 
-    return n_kpts, Int.(mapping), [Vec3{Int}(grid_address[:, i]) for i in 1:nkpt]
+    # Return in the same format as before: (n_kpts, mapping, grid_address)
+    # Note: result.ir_mapping_table is 1-indexed in v1.x
+    n_kpts = length(unique(result.ir_mapping_table))
+    mapping = Int.(result.ir_mapping_table)
+    grid = [Vec3{Int}(ga) for ga in result.grid_address]
+    return n_kpts, mapping, grid
 end
 
 normalize_magnetic_moment(::Nothing)::Vec3{Float64} = (0, 0, 0)
@@ -173,8 +162,8 @@ function spglib_standardize_cell(lattice::AbstractArray{T}, atom_groups, positio
     #      Essentially this does not influence the standardisation,
     #      but it only influences the kpath.
     cell, _ = spglib_cell(lattice, atom_groups, positions, magnetic_moments)
-    std_cell = Spglib.standardize_cell(cell; to_primitive=primitive, symprec=tol_symmetry,
-        no_idealize=!correct_symmetry)
+    std_cell = Spglib.standardize_cell(cell, tol_symmetry;
+        to_primitive=primitive, no_idealize=!correct_symmetry)
 
     lattice = Matrix{T}(std_cell.lattice)
     positions = Vec3{T}.(std_cell.positions)
@@ -189,7 +178,26 @@ end
 
 function spglib_spacegroup_number(model, magnetic_moments=[]; tol_symmetry=SYMMETRY_TOLERANCE)
     # Get spacegroup number according to International Tables for Crystallography (ITA)
-    # TODO Time-reversal symmetry disabled? (not yet available in DFTK)
     cell, _ = spglib_cell(model, magnetic_moments)
-    Spglib.get_spacegroup_number(cell, tol_symmetry)
+    Spglib.get_dataset(cell, tol_symmetry).spacegroup_number
+end
+
+"""
+    standardize_cell(cell, symprec=1e-5; kwargs...)
+
+Wrapper around `Spglib.standardize_cell` that returns a `StandardizedCell`,
+providing error messages for deprecated v0.6 field names.
+"""
+function standardize_cell(cell, symprec=1e-5; kwargs...)
+    StandardizedCell(Spglib.standardize_cell(cell, symprec; kwargs...))
+end
+
+"""
+    get_ir_reciprocal_mesh(cell, mesh, is_shift; kwargs...)
+
+Wrapper around `Spglib.get_ir_reciprocal_mesh` for BrillouinZoneMeshes.jl.
+Returns a `Spglib.BrillouinZoneMesh` struct (v1.x API).
+"""
+function get_ir_reciprocal_mesh(cell, mesh, is_shift; kwargs...)
+    Spglib.get_ir_reciprocal_mesh(cell, mesh; is_shift=is_shift, kwargs...)
 end

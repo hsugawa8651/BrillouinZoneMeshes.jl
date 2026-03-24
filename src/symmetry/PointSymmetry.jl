@@ -1,5 +1,4 @@
 module PointSymmetry
-using spglib_jll
 using LinearAlgebra
 using Printf
 using StaticArrays

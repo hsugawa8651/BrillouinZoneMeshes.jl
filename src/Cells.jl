@@ -174,12 +174,11 @@ function standard_cell(;
 
     magnetic_moments = []
     cell, _ = PointSymmetry.spglib_cell(_lattice, atom_groups, _positions, magnetic_moments)
-    std_cell = PointSymmetry.standardize_cell(cell; to_primitive=primitive, symprec=tol_symmetry,
-        no_idealize=!correct_symmetry)
+    std_cell = PointSymmetry.standardize_cell(cell, tol_symmetry;
+        to_primitive=primitive, no_idealize=!correct_symmetry)
 
     _lattice = Matrix{dtype}(std_cell.lattice)
-    _types = std_cell.types
-    _atoms = Int.(_types)
+    _atoms = Int.(std_cell.atoms)
     _positions = Vector{dtype}.(std_cell.positions)
     # magnetic_moments = normalize_magnetic_moment.(std_cell.magmoms)
 
